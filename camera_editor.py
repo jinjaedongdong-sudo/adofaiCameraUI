@@ -19,8 +19,8 @@ from typing import List, Tuple
 import pygame
 from tkinter import Tk, filedialog, simpledialog
 
-# Local minimal loader for ADOFAI maps
-from level import Level
+# Use adofaipy for reading and writing ADOFAI levels
+from adofaipy import LevelDict
 
 from easing import (
     EASING_FUNCTIONS,
@@ -449,7 +449,7 @@ class Editor:
         self.clock = pygame.time.Clock()
 
         # Load level and audio
-        self.level = Level.load(adofai_path)
+        self.level = LevelDict(str(adofai_path))
         self.audio_path = audio_path
         pygame.mixer.music.load(str(audio_path))
         self.track = CameraTrack()
@@ -483,7 +483,7 @@ class Editor:
         spb = 60_000 / bpm
         t = 0
         x = y = 0.0
-        angles = self.level.get_angles()[:-1]
+        angles = self.level.getAngles()[:-1]
         for ang in angles:
             tile_pos.append((x, y))
             tile_time.append(int(t))
@@ -494,7 +494,7 @@ class Editor:
         return tile_pos, tile_time
 
     def _init_keyframes_from_level(self) -> None:
-        for act in self.level.get_actions(lambda a: a.get("eventType") == "MoveCamera"):
+        for act in self.level.getActions(lambda a: a.get("eventType") == "MoveCamera"):
             floor = act.get("floor", 1)
             t = self.tile_time[min(floor - 1, len(self.tile_time) - 1)]
             pos = act.get("position", [0, 0])
@@ -632,6 +632,15 @@ class Editor:
     # ------------------------------------------------------------------
     def _draw(self) -> None:
         self.screen.fill((30, 30, 30))
+        # Grid for easier spatial editing
+        panel_w = 220
+        width = self.screen.get_width() - panel_w
+        height = self.screen.get_height() - self.timeline_height
+        for gx in range(0, width, 50):
+            pygame.draw.line(self.screen, (45, 45, 45), (gx, 0), (gx, height))
+        for gy in range(0, height, 50):
+            pygame.draw.line(self.screen, (45, 45, 45), (0, gy), (width, gy))
+
         # Draw tiles
         if self.tile_pos:
             pygame.draw.lines(self.screen, self.TILE_COLOUR, False, self.tile_pos, 2)
@@ -643,6 +652,8 @@ class Editor:
         cam_x, cam_y, _z, _a = self.track.get_state_at(self.current_ms)
         cam_col = self.RENDER_CAM_COLOUR if self.playing else self.CAM_COLOUR
         pygame.draw.circle(self.screen, cam_col, (int(cam_x), int(cam_y)), 7)
+        pygame.draw.line(self.screen, cam_col, (int(cam_x) - 10, int(cam_y)), (int(cam_x) + 10, int(cam_y)))
+        pygame.draw.line(self.screen, cam_col, (int(cam_x), int(cam_y) - 10), (int(cam_x), int(cam_y) + 10))
 
         # Timeline at bottom
         self._draw_timeline()
@@ -734,7 +745,7 @@ class Editor:
 # ---------------------------------------------------------------------------
 
     def save(self, out_path: Path) -> None:
-        self.level.remove_actions(lambda a: a.get("eventType") == "MoveCamera")
+        self.level.removeActions(lambda a: a.get("eventType") == "MoveCamera")
         for kf in self.track.keyframes:
             floor = self._floor_for_time(kf.time)
             curve = self._render_custom_ease(kf)
@@ -772,8 +783,8 @@ class Editor:
                     "n1": kf.bounce_params.n1,
                     "d1": kf.bounce_params.d1,
                 }
-            self.level.add_action(act)
-        self.level.save(out_path)
+            self.level.addAction(act)
+        self.level.writeToFile(str(out_path))
 
     def _floor_for_time(self, t: int) -> int:
         for i, tm in enumerate(self.tile_time):
@@ -823,7 +834,7 @@ class Editor:
         if not path:
             return
         try:
-            self.level = Level.load(Path(path))
+            self.level = LevelDict(path)
         except Exception as exc:
             print(f"Failed to load level: {exc}")
             return
