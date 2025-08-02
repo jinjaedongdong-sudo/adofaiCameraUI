@@ -11,21 +11,22 @@ as more editing tools or better timeline management can be added easily.
 """
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
 
 import pygame
-import adofaipy
 from tkinter import Tk, filedialog, simpledialog
+
+from adofaipy import LevelDict, Action
 
 from easing import (
     EASING_FUNCTIONS,
     BackParams,
     BounceParams,
     ElasticParams,
+    cubic_bezier,
     elastic,
     ease_in_back,
     ease_in_bounce,
@@ -52,6 +53,10 @@ class Keyframe:
     elastic_params: ElasticParams = field(default_factory=ElasticParams)
     back_params: BackParams = field(default_factory=BackParams)
     bounce_params: BounceParams = field(default_factory=BounceParams)
+    # Control points for custom bezier easing (p1x, p1y) and (p2x, p2y)
+    bezier_p1: Tuple[float, float] = (0.25, 0.25)
+    bezier_p2: Tuple[float, float] = (0.75, 0.75)
+    custom_ease: List[float] | None = None
 
 
 class CameraTrack:
@@ -87,25 +92,29 @@ class CameraTrack:
             if a.time <= time_ms <= b.time:
                 alpha = (time_ms - a.time) / (b.time - a.time)
                 # apply easing
-                if b.ease == "Elastic":
-                    alpha = elastic(alpha, b.elastic_params)
-                elif "Back" in b.ease:
-                    if b.ease == "EaseInBack":
-                        alpha = ease_in_back(alpha, b.back_params)
-                    elif b.ease == "EaseOutBack":
-                        alpha = ease_out_back(alpha, b.back_params)
-                    else:
-                        alpha = ease_in_out_back(alpha, b.back_params)
-                elif "Bounce" in b.ease:
-                    if b.ease == "EaseInBounce":
-                        alpha = ease_in_bounce(alpha, b.bounce_params)
-                    elif b.ease == "EaseOutBounce":
-                        alpha = ease_out_bounce(alpha, b.bounce_params)
-                    else:
-                        alpha = ease_in_out_bounce(alpha, b.bounce_params)
+                if b.custom_ease:
+                    idx = min(int(alpha * (len(b.custom_ease) - 1)), len(b.custom_ease) - 1)
+                    alpha = b.custom_ease[idx]
                 else:
-                    func = EASING_FUNCTIONS.get(b.ease, linear)
-                    alpha = func(alpha)
+                    if b.ease == "Elastic":
+                        alpha = elastic(alpha, b.elastic_params)
+                    elif "Back" in b.ease:
+                        if b.ease == "EaseInBack":
+                            alpha = ease_in_back(alpha, b.back_params)
+                        elif b.ease == "EaseOutBack":
+                            alpha = ease_out_back(alpha, b.back_params)
+                        else:
+                            alpha = ease_in_out_back(alpha, b.back_params)
+                    elif "Bounce" in b.ease:
+                        if b.ease == "EaseInBounce":
+                            alpha = ease_in_bounce(alpha, b.bounce_params)
+                        elif b.ease == "EaseOutBounce":
+                            alpha = ease_out_bounce(alpha, b.bounce_params)
+                        else:
+                            alpha = ease_in_out_bounce(alpha, b.bounce_params)
+                    else:
+                        func = EASING_FUNCTIONS.get(b.ease, linear)
+                        alpha = func(alpha)
                 x = a.x * (1 - alpha) + b.x * alpha
                 y = a.y * (1 - alpha) + b.y * alpha
                 z = a.zoom * (1 - alpha) + b.zoom * alpha
@@ -158,6 +167,9 @@ class CameraTrack:
             ElasticParams(src.elastic_params.oscillations, src.elastic_params.decay),
             BackParams(src.back_params.overshoot),
             BounceParams(src.bounce_params.n1, src.bounce_params.d1),
+            src.bezier_p1,
+            src.bezier_p2,
+            src.custom_ease[:] if src.custom_ease else None,
         )
         self.keyframes.append(dup)
         self.keyframes.sort(key=lambda k: k.time)
@@ -183,12 +195,13 @@ class CameraTrack:
         if self.selected_index is None:
             return
         kf = self.keyframes[self.selected_index]
-        keys = list(EASING_FUNCTIONS.keys()) + ["Elastic"]
+        keys = list(EASING_FUNCTIONS.keys()) + ["Elastic", "Bezier"]
         try:
             idx = keys.index(kf.ease)
         except ValueError:
             idx = 0
         kf.ease = keys[(idx + direction) % len(keys)]
+        kf.custom_ease = None
 
 
 # ---------------------------------------------------------------------------
@@ -255,18 +268,98 @@ class Button:
         surface.blit(txt, txt.get_rect(center=self.rect.center))
 
 
+class BezierEditor:
+    """Simple editor for a cubic Bezier easing curve."""
+
+    SIZE = 160
+
+    def __init__(self, kf: Keyframe, render_cb) -> None:
+        self.kf = kf
+        self.render_cb = render_cb
+        self.rect = pygame.Rect(0, 0, self.SIZE, self.SIZE)
+        self.dragging: int | None = None
+
+    def set_keyframe(self, kf: Keyframe) -> None:
+        self.kf = kf
+        self.kf.custom_ease = self.render_cb(self.kf)
+
+    def _p1_pixel(self) -> Tuple[float, float]:
+        return (
+            self.rect.x + self.kf.bezier_p1[0] * self.rect.width,
+            self.rect.y + (1 - self.kf.bezier_p1[1]) * self.rect.height,
+        )
+
+    def _p2_pixel(self) -> Tuple[float, float]:
+        return (
+            self.rect.x + self.kf.bezier_p2[0] * self.rect.width,
+            self.rect.y + (1 - self.kf.bezier_p2[1]) * self.rect.height,
+        )
+
+    def handle_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                p1 = self._p1_pixel()
+                p2 = self._p2_pixel()
+                if (event.pos[0] - p1[0]) ** 2 + (event.pos[1] - p1[1]) ** 2 <= 100:
+                    self.dragging = 1
+                elif (event.pos[0] - p2[0]) ** 2 + (event.pos[1] - p2[1]) ** 2 <= 100:
+                    self.dragging = 2
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self.dragging = None
+        elif event.type == pygame.MOUSEMOTION and self.dragging:
+            x = (event.pos[0] - self.rect.x) / self.rect.width
+            y = 1 - (event.pos[1] - self.rect.y) / self.rect.height
+            x = max(0.0, min(1.0, x))
+            y = max(0.0, min(1.0, y))
+            if self.dragging == 1:
+                self.kf.bezier_p1 = (x, y)
+            else:
+                self.kf.bezier_p2 = (x, y)
+            self.kf.custom_ease = self.render_cb(self.kf)
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font, x: int, y: int) -> None:
+        self.rect.topleft = (x, y)
+        pygame.draw.rect(surface, (80, 80, 80), self.rect, 1)
+        # Draw curve
+        func = cubic_bezier(
+            self.kf.bezier_p1[0],
+            self.kf.bezier_p1[1],
+            self.kf.bezier_p2[0],
+            self.kf.bezier_p2[1],
+        )
+        pts = []
+        for i in range(21):
+            t = i / 20
+            px = x + t * self.rect.width
+            py = y + (1 - func(t)) * self.rect.height
+            pts.append((px, py))
+        pygame.draw.lines(surface, (200, 200, 0), False, pts, 2)
+        # Draw control points and handles
+        p1 = self._p1_pixel()
+        p2 = self._p2_pixel()
+        start = (self.rect.x, self.rect.y + self.rect.height)
+        end = (self.rect.x + self.rect.width, self.rect.y)
+        pygame.draw.line(surface, (150, 150, 150), start, p1)
+        pygame.draw.line(surface, (150, 150, 150), end, p2)
+        pygame.draw.circle(surface, (0, 255, 0), p1, 5)
+        pygame.draw.circle(surface, (0, 255, 0), p2, 5)
+
+
 class ParamPanel:
     BG = (45, 45, 45)
 
-    def __init__(self) -> None:
+    def __init__(self, render_cb) -> None:
         self.kf: Keyframe | None = None
         self.sliders: list[ParamSlider] = []
+        self.render_cb = render_cb
+        self.bezier_editor: BezierEditor | None = None
 
     def set_keyframe(self, kf: Keyframe | None) -> None:
         if self.kf is kf and (kf is None or self.kf.ease == kf.ease):
             return
         self.kf = kf
         self.sliders.clear()
+        self.bezier_editor = None
         if kf is None:
             return
         if kf.ease == "Elastic":
@@ -307,8 +400,13 @@ class ParamPanel:
                     lambda v: setattr(kf.bounce_params, "d1", v),
                 )
             )
+        elif kf.ease == "Bezier":
+            self.bezier_editor = BezierEditor(kf, self.render_cb)
+            kf.custom_ease = self.render_cb(kf)
 
     def handle_event(self, event: pygame.event.Event) -> None:
+        if self.bezier_editor:
+            self.bezier_editor.handle_event(event)
         for s in self.sliders:
             s.handle_event(event)
 
@@ -325,10 +423,13 @@ class ParamPanel:
         for s in self.sliders:
             s.draw(surface, font, rect.x + 10, y)
             y += 40
+        if self.bezier_editor:
+            self.bezier_editor.draw(surface, font, rect.x + 10, y)
 class Editor:
     TILE_COLOUR = (200, 200, 200)
     KEYFRAME_COLOUR = (255, 0, 0)
     CAM_COLOUR = (0, 0, 255)
+    RENDER_CAM_COLOUR = (255, 150, 0)
 
     def __init__(self, adofai_path: Path, audio_path: Path) -> None:
         pygame.init()
@@ -338,7 +439,7 @@ class Editor:
         self.clock = pygame.time.Clock()
 
         # Load level and audio
-        self.level = adofaipy.load(str(adofai_path))
+        self.level = LevelDict(str(adofai_path))
         self.audio_path = audio_path
         pygame.mixer.music.load(str(audio_path))
         self.track = CameraTrack()
@@ -349,13 +450,17 @@ class Editor:
         self.playing = False
         self.current_ms = 0
         self.font = pygame.font.SysFont("arial", 16)
-        self.param_panel = ParamPanel()
+        self.param_panel = ParamPanel(self._render_custom_ease)
         # ui buttons
         self.buttons: list[Button] = [
             Button(pygame.Rect(10, 10, 100, 30), "Open Level", self._open_level),
             Button(pygame.Rect(120, 10, 100, 30), "Open Audio", self._open_audio),
             Button(pygame.Rect(230, 10, 100, 30), "Save", self._save_dialog),
         ]
+        # timeline state
+        self.timeline_height = 120
+        self.timeline_rect = pygame.Rect(0, 0, 0, 0)
+        self.timeline_scrubbing = False
 
     # ------------------------------------------------------------------
     # Level parsing
@@ -363,22 +468,14 @@ class Editor:
     def _parse_tiles(self) -> Tuple[List[Tuple[float, float]], List[int]]:
         tile_pos: List[Tuple[float, float]] = []
         tile_time: List[int] = []
-        path = self.level.pathData
         bpm = self.level.settings.get("bpm", 120)
         spb = 60_000 / bpm
         t = 0
-        x = y = ang = 0.0
-        DIRS = {
-            "D": 0, "E": 45, "W": 90, "Q": 135, "A": 180, "Z": 225,
-            "S": 270, "C": 315,
-            "R": 0, "T": 30, "Y": 60, "J": 120, "H": 150, "N": 210,
-            "M": 240, "V": 270, "B": 300,
-        }
-        for ch in path:
+        x = y = 0.0
+        angles = self.level.getAngles()[:-1]
+        for ang in angles:
             tile_pos.append((x, y))
             tile_time.append(int(t))
-            d = DIRS.get(ch, 0)
-            ang += d
             rad = math.radians(ang)
             x += math.cos(rad) * 50
             y += math.sin(rad) * 50
@@ -386,25 +483,33 @@ class Editor:
         return tile_pos, tile_time
 
     def _init_keyframes_from_level(self) -> None:
-        for act in self.level.actions:
-            if act.get("eventType") == "MoveCamera":
-                floor = act.get("floor", 1)
-                t = self.tile_time[min(floor - 1, len(self.tile_time) - 1)]
-                pos = act.get("position", [0, 0])
-                zoom = act.get("zoom", 100)
-                angle = act.get("angleOffset", 0)
-                ease = act.get("ease", "Linear")
-                kf = Keyframe(t, pos[0], pos[1], zoom, angle, ease)
-                if ease == "Elastic" and "elasticParams" in act:
-                    ep = act["elasticParams"]
-                    kf.elastic_params = ElasticParams(ep.get("oscillations", 3), ep.get("decay", 3.0))
-                if "Back" in ease and "backParams" in act:
-                    bp = act["backParams"]
-                    kf.back_params = BackParams(bp.get("overshoot", 1.70158))
-                if "Bounce" in ease and "bounceParams" in act:
-                    bp2 = act["bounceParams"]
-                    kf.bounce_params = BounceParams(bp2.get("n1", 7.5625), bp2.get("d1", 2.75))
-                self.track.keyframes.append(kf)
+        for act in self.level.getActions(lambda a: a.get("eventType") == "MoveCamera"):
+            floor = act.get("floor", 1)
+            t = self.tile_time[min(floor - 1, len(self.tile_time) - 1)]
+            pos = act.get("position", [0, 0])
+            zoom = act.get("zoom", 100)
+            angle = act.get("angleOffset", 0)
+            ease = act.get("ease", "Linear")
+            kf = Keyframe(t, pos[0], pos[1], zoom, angle, ease)
+            if "bezier" in act:
+                bez = act["bezier"]
+                kf.ease = "Bezier"
+                kf.bezier_p1 = (bez[0], bez[1])
+                kf.bezier_p2 = (bez[2], bez[3])
+            if "customEase" in act:
+                kf.custom_ease = act["customEase"]
+            else:
+                kf.custom_ease = self._render_custom_ease(kf)
+            if ease == "Elastic" and "elasticParams" in act:
+                ep = act["elasticParams"]
+                kf.elastic_params = ElasticParams(ep.get("oscillations", 3), ep.get("decay", 3.0))
+            if "Back" in ease and "backParams" in act:
+                bp = act["backParams"]
+                kf.back_params = BackParams(bp.get("overshoot", 1.70158))
+            if "Bounce" in ease and "bounceParams" in act:
+                bp2 = act["bounceParams"]
+                kf.bounce_params = BounceParams(bp2.get("n1", 7.5625), bp2.get("d1", 2.75))
+            self.track.keyframes.append(kf)
         self.track.keyframes.sort(key=lambda k: k.time)
 
     # ------------------------------------------------------------------
@@ -466,8 +571,16 @@ class Editor:
                     self._prompt_selected("angle")
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
-                if mx < self.screen.get_width() - 220:
+                if self.timeline_rect.collidepoint(event.pos):
+                    self._set_time_from_timeline(mx)
+                    self.timeline_scrubbing = True
+                    self.playing = False
+                elif mx < self.screen.get_width() - 220:
                     self.track.select_by_pos((mx, my))
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self.timeline_scrubbing = False
+            elif event.type == pygame.MOUSEMOTION and self.timeline_scrubbing:
+                self._set_time_from_timeline(event.pos[0])
         self.param_panel.set_keyframe(self.track.current())
 
     def _toggle_play(self) -> None:
@@ -482,6 +595,12 @@ class Editor:
             return
         self.current_ms = self.track.keyframes[self.track.selected_index].time
 
+    def _set_time_from_timeline(self, mx: int) -> None:
+        panel_w = 220
+        width = self.screen.get_width() - panel_w
+        total = self.tile_time[-1] if self.tile_time else 1
+        self.current_ms = int(mx / max(1, width) * total)
+
     # ------------------------------------------------------------------
     def _draw(self) -> None:
         self.screen.fill((30, 30, 30))
@@ -494,24 +613,11 @@ class Editor:
             pygame.draw.circle(self.screen, colour, (int(kf.x), int(kf.y)), 5)
         # Draw camera position
         cam_x, cam_y, _z, _a = self.track.get_state_at(self.current_ms)
-        pygame.draw.circle(self.screen, self.CAM_COLOUR, (int(cam_x), int(cam_y)), 7)
+        cam_col = self.RENDER_CAM_COLOUR if self.playing else self.CAM_COLOUR
+        pygame.draw.circle(self.screen, cam_col, (int(cam_x), int(cam_y)), 7)
 
-        # Simple timeline at bottom
-        tl_height = 40
-        panel_w = 220
-        pygame.draw.rect(
-            self.screen,
-            (80, 80, 80),
-            pygame.Rect(0, self.screen.get_height() - tl_height,
-                        self.screen.get_width() - panel_w, tl_height),
-        )
-        total = self.tile_time[-1] if self.tile_time else 1
-        x = int(self.current_ms / total * (self.screen.get_width() - panel_w))
-        pygame.draw.rect(
-            self.screen,
-            (200, 200, 0),
-            pygame.Rect(x - 2, self.screen.get_height() - tl_height, 4, tl_height),
-        )
+        # Timeline at bottom
+        self._draw_timeline()
 
         # Easing preview for selected pair
         self._draw_easing_preview()
@@ -521,6 +627,59 @@ class Editor:
             btn.draw(self.screen, self.font)
         pygame.display.flip()
 
+    def _draw_timeline(self) -> None:
+        panel_w = 220
+        width = self.screen.get_width() - panel_w
+        y = self.screen.get_height() - self.timeline_height
+        self.timeline_rect = pygame.Rect(0, y, width, self.timeline_height)
+        pygame.draw.rect(self.screen, (60, 60, 60), self.timeline_rect)
+        total = self.tile_time[-1] if self.tile_time else 1
+        row_h = self.timeline_height // 4
+        params = [
+            ("x", (255, 80, 80)),
+            ("y", (80, 255, 80)),
+            ("zoom", (80, 80, 255)),
+            ("angle", (255, 255, 80)),
+        ]
+        for idx, (attr, colour) in enumerate(params):
+            row_top = y + idx * row_h
+            pygame.draw.line(
+                self.screen, (80, 80, 80), (0, row_top + row_h // 2), (width, row_top + row_h // 2)
+            )
+            vals = [getattr(kf, attr) for kf in self.track.keyframes]
+            if not vals:
+                continue
+            vmin, vmax = min(vals), max(vals)
+            if vmin == vmax:
+                vmin -= 1
+                vmax += 1
+            sample = 200
+            points: list[tuple[int, float]] = []
+            for i in range(sample):
+                t = i / (sample - 1) * total
+                x, y_val, z, a = self.track.get_state_at(int(t))
+                value = {"x": x, "y": y_val, "zoom": z, "angle": a}[attr]
+                px = int(i / (sample - 1) * width)
+                py = row_top + row_h - (value - vmin) / (vmax - vmin) * row_h
+                points.append((px, py))
+            if points:
+                pygame.draw.lines(self.screen, colour, False, points, 2)
+            for kf in self.track.keyframes:
+                px = int(kf.time / total * width)
+                val = getattr(kf, attr)
+                py = row_top + row_h - (val - vmin) / (vmax - vmin) * row_h
+                pygame.draw.circle(self.screen, colour, (px, int(py)), 3)
+            label = self.font.render(attr, True, colour)
+            self.screen.blit(label, (5, row_top + 2))
+        scrub_x = int(self.current_ms / total * width)
+        pygame.draw.line(
+            self.screen,
+            (230, 230, 230),
+            (scrub_x, y),
+            (scrub_x, y + self.timeline_height),
+            2,
+        )
+
     def _draw_easing_preview(self) -> None:
         idx = self.track.selected_index
         if idx is None or idx == 0:
@@ -529,28 +688,10 @@ class Editor:
         b = self.track.keyframes[idx]
         rect = pygame.Rect(10, 10, 200, 100)
         pygame.draw.rect(self.screen, (50, 50, 50), rect, 1)
+        curve = self._render_custom_ease(b, samples=100)
         points = []
-        for i in range(100):
-            t = i / 99
-            if b.ease == "Elastic":
-                y = elastic(t, b.elastic_params)
-            elif "Back" in b.ease:
-                if b.ease == "EaseInBack":
-                    y = ease_in_back(t, b.back_params)
-                elif b.ease == "EaseOutBack":
-                    y = ease_out_back(t, b.back_params)
-                else:
-                    y = ease_in_out_back(t, b.back_params)
-            elif "Bounce" in b.ease:
-                if b.ease == "EaseInBounce":
-                    y = ease_in_bounce(t, b.bounce_params)
-                elif b.ease == "EaseOutBounce":
-                    y = ease_out_bounce(t, b.bounce_params)
-                else:
-                    y = ease_in_out_bounce(t, b.bounce_params)
-            else:
-                func = EASING_FUNCTIONS.get(b.ease, linear)
-                y = func(t)
+        for i, y in enumerate(curve):
+            t = i / (len(curve) - 1)
             px = rect.left + t * rect.width
             py = rect.bottom - y * rect.height
             points.append((px, py))
@@ -563,10 +704,12 @@ class Editor:
 # ---------------------------------------------------------------------------
 
     def save(self, out_path: Path) -> None:
-        actions = [a for a in self.level.actions
-                   if a.get("eventType") != "MoveCamera"]
+        self.level.removeActions(lambda a: a.get("eventType") == "MoveCamera")
         for kf in self.track.keyframes:
             floor = self._floor_for_time(kf.time)
+            curve = self._render_custom_ease(kf)
+            kf.custom_ease = curve
+            ease_val = kf.ease if kf.ease != "Bezier" else "Linear"
             act = {
                 "floor": floor,
                 "eventType": "MoveCamera",
@@ -575,8 +718,16 @@ class Editor:
                 "position": [kf.x, kf.y],
                 "zoom": kf.zoom,
                 "angleOffset": kf.angle,
-                "ease": kf.ease,
+                "ease": ease_val,
+                "customEase": curve,
             }
+            if kf.ease == "Bezier":
+                act["bezier"] = [
+                    kf.bezier_p1[0],
+                    kf.bezier_p1[1],
+                    kf.bezier_p2[0],
+                    kf.bezier_p2[1],
+                ]
             if kf.ease == "Elastic":
                 act["elasticParams"] = {
                     "oscillations": kf.elastic_params.oscillations,
@@ -591,16 +742,44 @@ class Editor:
                     "n1": kf.bounce_params.n1,
                     "d1": kf.bounce_params.d1,
                 }
-            actions.append(act)
-        self.level.actions = actions
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(self.level.dict(), f, ensure_ascii=False, indent=2)
+            self.level.addAction(Action(act))
+        self.level.writeToFile(str(out_path))
 
     def _floor_for_time(self, t: int) -> int:
         for i, tm in enumerate(self.tile_time):
             if tm >= t:
                 return i + 1
         return len(self.tile_time)
+
+    def _render_custom_ease(self, kf: Keyframe, samples: int = 60) -> List[float]:
+        """Render the easing curve for ``kf`` using only built-in functions."""
+        t_values = [i / (samples - 1) for i in range(samples)]
+        if kf.ease == "Elastic":
+            func = lambda t: elastic(t, kf.elastic_params)
+        elif "Back" in kf.ease:
+            if kf.ease == "EaseInBack":
+                func = lambda t: ease_in_back(t, kf.back_params)
+            elif kf.ease == "EaseOutBack":
+                func = lambda t: ease_out_back(t, kf.back_params)
+            else:
+                func = lambda t: ease_in_out_back(t, kf.back_params)
+        elif "Bounce" in kf.ease:
+            if kf.ease == "EaseInBounce":
+                func = lambda t: ease_in_bounce(t, kf.bounce_params)
+            elif kf.ease == "EaseOutBounce":
+                func = lambda t: ease_out_bounce(t, kf.bounce_params)
+            else:
+                func = lambda t: ease_in_out_bounce(t, kf.bounce_params)
+        elif kf.ease == "Bezier":
+            func = cubic_bezier(
+                kf.bezier_p1[0],
+                kf.bezier_p1[1],
+                kf.bezier_p2[0],
+                kf.bezier_p2[1],
+            )
+        else:
+            func = EASING_FUNCTIONS.get(kf.ease, linear)
+        return [func(t) for t in t_values]
 
     # ------------------------------------------------------------------
     # File operations and prompts
@@ -612,7 +791,7 @@ class Editor:
         root.destroy()
         if not path:
             return
-        self.level = adofaipy.load(path)
+        self.level = LevelDict(str(path))
         self.track = CameraTrack()
         self.tile_pos, self.tile_time = self._parse_tiles()
         self._init_keyframes_from_level()
