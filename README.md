@@ -1,1 +1,32 @@
-# adofaiCameraUI
+# ADOFAI Camera UI
+
+This repository contains an experimental camera editor for [ADOFAI](https://store.steampowered.com/app/977950/A_Dance_of_Fire_and_Ice/) maps.  The editor is written in Python and uses `pygame` for real‑time rendering of the tile path and camera keyframes.  MoveCamera events can be created and adjusted interactively and saved back to a `.adofai` file.
+
+## Features
+
+* Load an existing `.adofai` level and its audio file
+* Display tile path in world coordinates
+* Add and move camera keyframes with easing functions
+* Elastic easing with configurable oscillation/decay parameters
+* Real‑time preview of camera position and easing curve
+
+The project is in a prototype state and many features from the original
+specification are not yet implemented, such as full timeline editing,
+comprehensive keyframe manipulation and a dedicated UI for parameter editing.
+
+## Usage
+
+```bash
+python camera_editor.py <level.adofai> <audio.ogg>
+```
+
+The editor uses `pygame` and `adofaipy`.  Ensure the required dependencies are
+installed:
+
+```bash
+pip install pygame adofaipy numpy
+```
+
+## License
+
+Released under the MIT License.
