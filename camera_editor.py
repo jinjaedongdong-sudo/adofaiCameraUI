@@ -144,6 +144,15 @@ class CameraTrack:
         kf.x += dx
         kf.y += dy
 
+    def move_time_selected(self, dt: int) -> None:
+        """Shift the selected keyframe in time."""
+        if self.selected_index is None:
+            return
+        kf = self.keyframes[self.selected_index]
+        kf.time = max(0, kf.time + dt)
+        self.keyframes.sort(key=lambda k: k.time)
+        self.selected_index = self.keyframes.index(kf)
+
     def delete_selected(self) -> None:
         if self.selected_index is None:
             return
@@ -448,6 +457,7 @@ class Editor:
 
         # state
         self.playing = False
+        self.play_start_ms = 0
         self.current_ms = 0
         self.font = pygame.font.SysFont("arial", 16)
         self.param_panel = ParamPanel(self._render_custom_ease)
@@ -517,12 +527,16 @@ class Editor:
     # ------------------------------------------------------------------
     def run(self) -> None:
         while True:
-            dt = self.clock.tick(60)
+            self.clock.tick(60)
             self._handle_events()
             if self.playing:
-                self.current_ms += dt
-                if self.current_ms >= self.tile_time[-1]:
-                    self.playing = False
+                pos = pygame.mixer.music.get_pos()
+                if pos == -1:
+                    self._stop_playback()
+                else:
+                    self.current_ms = self.play_start_ms + pos
+                    if self.current_ms >= self.tile_time[-1]:
+                        self._stop_playback()
             self._draw()
 
     # ------------------------------------------------------------------
@@ -561,6 +575,10 @@ class Editor:
                     self.track.move_selected(0, -1)
                 elif event.key == pygame.K_s:
                     self.track.move_selected(0, 1)
+                elif event.key == pygame.K_LEFT and event.mod & pygame.KMOD_SHIFT:
+                    self.track.move_time_selected(-50)
+                elif event.key == pygame.K_RIGHT and event.mod & pygame.KMOD_SHIFT:
+                    self.track.move_time_selected(50)
                 elif event.key == pygame.K_x and event.mod & pygame.KMOD_CTRL:
                     self._prompt_selected("x")
                 elif event.key == pygame.K_y and event.mod & pygame.KMOD_CTRL:
@@ -574,7 +592,7 @@ class Editor:
                 if self.timeline_rect.collidepoint(event.pos):
                     self._set_time_from_timeline(mx)
                     self.timeline_scrubbing = True
-                    self.playing = False
+                    self._stop_playback()
                 elif mx < self.screen.get_width() - 220:
                     self.track.select_by_pos((mx, my))
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -583,12 +601,20 @@ class Editor:
                 self._set_time_from_timeline(event.pos[0])
         self.param_panel.set_keyframe(self.track.current())
 
+    def _stop_playback(self) -> None:
+        if self.playing:
+            pygame.mixer.music.stop()
+            self.playing = False
+
     def _toggle_play(self) -> None:
         if self.playing:
-            pygame.mixer.music.pause()
+            self.current_ms = self.play_start_ms + max(0, pygame.mixer.music.get_pos())
+            pygame.mixer.music.stop()
+            self.playing = False
         else:
+            self.play_start_ms = self.current_ms
             pygame.mixer.music.play(start=self.current_ms / 1000.0)
-        self.playing = not self.playing
+            self.playing = True
 
     def _jump_to_selected(self) -> None:
         if self.track.selected_index is None:
@@ -599,7 +625,8 @@ class Editor:
         panel_w = 220
         width = self.screen.get_width() - panel_w
         total = self.tile_time[-1] if self.tile_time else 1
-        self.current_ms = int(mx / max(1, width) * total)
+        pos = max(0, min(width, mx))
+        self.current_ms = int(pos / max(1, width) * total)
 
     # ------------------------------------------------------------------
     def _draw(self) -> None:
@@ -679,6 +706,8 @@ class Editor:
             (scrub_x, y + self.timeline_height),
             2,
         )
+        time_txt = self.font.render(f"{self.current_ms/1000:.2f}s", True, (255, 255, 255))
+        self.screen.blit(time_txt, (scrub_x + 5, y + 5))
 
     def _draw_easing_preview(self) -> None:
         idx = self.track.selected_index
@@ -786,24 +815,34 @@ class Editor:
     # ------------------------------------------------------------------
 
     def _open_level(self) -> None:
+        self._stop_playback()
         root = Tk(); root.withdraw()
         path = filedialog.askopenfilename(filetypes=[("ADOFAI", "*.adofai")])
         root.destroy()
         if not path:
             return
-        self.level = LevelDict(str(path))
+        try:
+            self.level = LevelDict(str(path))
+        except Exception as exc:
+            print(f"Failed to load level: {exc}")
+            return
         self.track = CameraTrack()
         self.tile_pos, self.tile_time = self._parse_tiles()
         self._init_keyframes_from_level()
         self.current_ms = 0
 
     def _open_audio(self) -> None:
+        self._stop_playback()
         root = Tk(); root.withdraw()
         path = filedialog.askopenfilename(filetypes=[("Audio", "*.ogg *.mp3 *.wav")])
         root.destroy()
         if not path:
             return
-        pygame.mixer.music.load(path)
+        try:
+            pygame.mixer.music.load(path)
+            self.audio_path = Path(path)
+        except pygame.error as exc:
+            print(f"Failed to load audio: {exc}")
 
     def _save_dialog(self) -> None:
         root = Tk(); root.withdraw()
