@@ -6,13 +6,28 @@ This repository contains an experimental camera editor for [ADOFAI](https://stor
 
 * Load an existing `.adofai` level and its audio file
 * Display tile path in world coordinates
-* Add and move camera keyframes with easing functions
+* Add and move camera keyframes with a wide range of easing functions
+  (Quad, Cubic, Quart, Quint, Sine, Expo, Circ, Back, Bounce, Elastic)
 * Elastic easing with configurable oscillation/decay parameters
 * Real‑time preview of camera position and easing curve
+* Convenience shortcuts inspired by animation tools (add/delete/duplicate
+  keyframes, cycle easing types, jump between keyframes)
 
 The project is in a prototype state and many features from the original
 specification are not yet implemented, such as full timeline editing,
 comprehensive keyframe manipulation and a dedicated UI for parameter editing.
+
+### Keyboard shortcuts
+
+| Key | Action |
+| --- | ------ |
+| `Space` | Play/Pause |
+| `N` | Add keyframe at current time |
+| `Delete/Backspace` | Delete selected keyframe |
+| `Ctrl+D` | Duplicate selected keyframe |
+| `,` / `.` | Select previous / next keyframe |
+| `Tab` / `Shift+Tab` | Cycle easing forward/backward |
+| `W` `A` `S` `D` | Move selected keyframe |
 
 ## Usage
 

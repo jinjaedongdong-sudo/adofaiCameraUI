@@ -55,9 +55,11 @@ class CameraTrack:
         self, time: int, x: float, y: float, zoom: float, angle: float,
         ease: str = "Linear"
     ) -> None:
+        """Add a keyframe and select it."""
         kf = Keyframe(time, x, y, zoom, angle, ease)
         self.keyframes.append(kf)
         self.keyframes.sort(key=lambda k: k.time)
+        self.selected_index = self.keyframes.index(kf)
 
     def get_state_at(self, time_ms: int) -> Tuple[float, float, float, float]:
         """Linear interpolation between keyframes with easing applied."""
@@ -103,6 +105,59 @@ class CameraTrack:
         kf = self.keyframes[self.selected_index]
         kf.x += dx
         kf.y += dy
+
+    def delete_selected(self) -> None:
+        if self.selected_index is None:
+            return
+        del self.keyframes[self.selected_index]
+        if self.keyframes:
+            self.selected_index = min(self.selected_index, len(self.keyframes) - 1)
+        else:
+            self.selected_index = None
+
+    def duplicate_selected(self, offset_ms: int = 100) -> None:
+        if self.selected_index is None:
+            return
+        src = self.keyframes[self.selected_index]
+        dup = Keyframe(
+            src.time + offset_ms,
+            src.x,
+            src.y,
+            src.zoom,
+            src.angle,
+            src.ease,
+            ElasticParams(src.elastic_params.oscillations, src.elastic_params.decay),
+        )
+        self.keyframes.append(dup)
+        self.keyframes.sort(key=lambda k: k.time)
+        self.selected_index = self.keyframes.index(dup)
+
+    def select_next(self) -> None:
+        if not self.keyframes:
+            return
+        if self.selected_index is None:
+            self.selected_index = 0
+        else:
+            self.selected_index = min(self.selected_index + 1, len(self.keyframes) - 1)
+
+    def select_prev(self) -> None:
+        if not self.keyframes:
+            return
+        if self.selected_index is None:
+            self.selected_index = len(self.keyframes) - 1
+        else:
+            self.selected_index = max(self.selected_index - 1, 0)
+
+    def cycle_ease(self, direction: int = 1) -> None:
+        if self.selected_index is None:
+            return
+        kf = self.keyframes[self.selected_index]
+        keys = list(EASING_FUNCTIONS.keys()) + ["Elastic"]
+        try:
+            idx = keys.index(kf.ease)
+        except ValueError:
+            idx = 0
+        kf.ease = keys[(idx + direction) % len(keys)]
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +252,29 @@ class Editor:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE:
                     self._toggle_play()
-                if event.key == pygame.K_a:
+                elif event.key == pygame.K_n:
+                    x, y, z, a = self.track.get_state_at(self.current_ms)
+                    self.track.add_keyframe(self.current_ms, x, y, z, a)
+                elif event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
+                    self.track.delete_selected()
+                elif event.key == pygame.K_d and event.mod & pygame.KMOD_CTRL:
+                    self.track.duplicate_selected()
+                elif event.key == pygame.K_COMMA:
+                    self.track.select_prev()
+                    self._jump_to_selected()
+                elif event.key == pygame.K_PERIOD:
+                    self.track.select_next()
+                    self._jump_to_selected()
+                elif event.key == pygame.K_TAB:
+                    direction = -1 if event.mod & pygame.KMOD_SHIFT else 1
+                    self.track.cycle_ease(direction)
+                elif event.key == pygame.K_a:
                     self.track.move_selected(-1, 0)
-                if event.key == pygame.K_d:
+                elif event.key == pygame.K_d:
                     self.track.move_selected(1, 0)
-                if event.key == pygame.K_w:
+                elif event.key == pygame.K_w:
                     self.track.move_selected(0, -1)
-                if event.key == pygame.K_s:
+                elif event.key == pygame.K_s:
                     self.track.move_selected(0, 1)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
@@ -215,6 +286,11 @@ class Editor:
         else:
             pygame.mixer.music.play(start=self.current_ms / 1000.0)
         self.playing = not self.playing
+
+    def _jump_to_selected(self) -> None:
+        if self.track.selected_index is None:
+            return
+        self.current_ms = self.track.keyframes[self.track.selected_index].time
 
     # ------------------------------------------------------------------
     def _draw(self) -> None:
