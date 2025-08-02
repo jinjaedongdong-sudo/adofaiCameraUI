@@ -19,7 +19,8 @@ from typing import List, Tuple
 import pygame
 from tkinter import Tk, filedialog, simpledialog
 
-from adofaipy import LevelDict, Action
+# Local minimal loader for ADOFAI maps
+from level import Level
 
 from easing import (
     EASING_FUNCTIONS,
@@ -448,7 +449,7 @@ class Editor:
         self.clock = pygame.time.Clock()
 
         # Load level and audio
-        self.level = LevelDict(str(adofai_path))
+        self.level = Level.load(adofai_path)
         self.audio_path = audio_path
         pygame.mixer.music.load(str(audio_path))
         self.track = CameraTrack()
@@ -482,7 +483,7 @@ class Editor:
         spb = 60_000 / bpm
         t = 0
         x = y = 0.0
-        angles = self.level.getAngles()[:-1]
+        angles = self.level.get_angles()[:-1]
         for ang in angles:
             tile_pos.append((x, y))
             tile_time.append(int(t))
@@ -493,7 +494,7 @@ class Editor:
         return tile_pos, tile_time
 
     def _init_keyframes_from_level(self) -> None:
-        for act in self.level.getActions(lambda a: a.get("eventType") == "MoveCamera"):
+        for act in self.level.get_actions(lambda a: a.get("eventType") == "MoveCamera"):
             floor = act.get("floor", 1)
             t = self.tile_time[min(floor - 1, len(self.tile_time) - 1)]
             pos = act.get("position", [0, 0])
@@ -733,7 +734,7 @@ class Editor:
 # ---------------------------------------------------------------------------
 
     def save(self, out_path: Path) -> None:
-        self.level.removeActions(lambda a: a.get("eventType") == "MoveCamera")
+        self.level.remove_actions(lambda a: a.get("eventType") == "MoveCamera")
         for kf in self.track.keyframes:
             floor = self._floor_for_time(kf.time)
             curve = self._render_custom_ease(kf)
@@ -771,8 +772,8 @@ class Editor:
                     "n1": kf.bounce_params.n1,
                     "d1": kf.bounce_params.d1,
                 }
-            self.level.addAction(Action(act))
-        self.level.writeToFile(str(out_path))
+            self.level.add_action(act)
+        self.level.save(out_path)
 
     def _floor_for_time(self, t: int) -> int:
         for i, tm in enumerate(self.tile_time):
@@ -822,7 +823,7 @@ class Editor:
         if not path:
             return
         try:
-            self.level = LevelDict(str(path))
+            self.level = Level.load(Path(path))
         except Exception as exc:
             print(f"Failed to load level: {exc}")
             return

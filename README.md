@@ -37,11 +37,10 @@ comprehensive keyframe manipulation.
 python camera_editor.py <level.adofai> <audio.ogg>
 ```
 
-The editor uses `pygame` and `adofaipy`.  Ensure the required dependencies are
-installed:
+The editor uses `pygame`.  Ensure the required dependency is installed:
 
 ```bash
-pip install pygame adofaipy numpy
+pip install pygame
 ```
 
 ## License
