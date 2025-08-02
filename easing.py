@@ -134,29 +134,40 @@ def ease_in_out_circ(t: float) -> float:
     return (math.sqrt(1 - (-2 * t + 2) ** 2) + 1) / 2
 
 
-def ease_in_back(t: float) -> float:
-    c1 = 1.70158
+@dataclass
+class BackParams:
+    overshoot: float = 1.70158
+
+
+def ease_in_back(t: float, params: BackParams = BackParams()) -> float:
+    c1 = params.overshoot
     c3 = c1 + 1
     return c3 * t ** 3 - c1 * t ** 2
 
 
-def ease_out_back(t: float) -> float:
-    c1 = 1.70158
+def ease_out_back(t: float, params: BackParams = BackParams()) -> float:
+    c1 = params.overshoot
     c3 = c1 + 1
     return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2
 
 
-def ease_in_out_back(t: float) -> float:
-    c1 = 1.70158
+def ease_in_out_back(t: float, params: BackParams = BackParams()) -> float:
+    c1 = params.overshoot
     c2 = c1 * 1.525
     if t < 0.5:
         return ((2 * t) ** 2 * ((c2 + 1) * 2 * t - c2)) / 2
     return ((2 * t - 2) ** 2 * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2
 
 
-def ease_out_bounce(t: float) -> float:
-    n1 = 7.5625
-    d1 = 2.75
+@dataclass
+class BounceParams:
+    n1: float = 7.5625
+    d1: float = 2.75
+
+
+def ease_out_bounce(t: float, params: BounceParams = BounceParams()) -> float:
+    n1 = params.n1
+    d1 = params.d1
     if t < 1 / d1:
         return n1 * t * t
     if t < 2 / d1:
@@ -169,14 +180,14 @@ def ease_out_bounce(t: float) -> float:
     return n1 * t * t + 0.984375
 
 
-def ease_in_bounce(t: float) -> float:
-    return 1 - ease_out_bounce(1 - t)
+def ease_in_bounce(t: float, params: BounceParams = BounceParams()) -> float:
+    return 1 - ease_out_bounce(1 - t, params)
 
 
-def ease_in_out_bounce(t: float) -> float:
+def ease_in_out_bounce(t: float, params: BounceParams = BounceParams()) -> float:
     if t < 0.5:
-        return (1 - ease_out_bounce(1 - 2 * t)) / 2
-    return (1 + ease_out_bounce(2 * t - 1)) / 2
+        return (1 - ease_out_bounce(1 - 2 * t, params)) / 2
+    return (1 + ease_out_bounce(2 * t - 1, params)) / 2
 
 # ---------------------------------------------------------------------------
 # Elastic easing

@@ -18,13 +18,20 @@ from pathlib import Path
 from typing import List, Tuple
 
 import pygame
-import numpy as np
 import adofaipy
 
 from easing import (
     EASING_FUNCTIONS,
+    BackParams,
+    BounceParams,
     ElasticParams,
     elastic,
+    ease_in_back,
+    ease_in_bounce,
+    ease_in_out_back,
+    ease_in_out_bounce,
+    ease_out_back,
+    ease_out_bounce,
     linear,
 )
 
@@ -42,6 +49,8 @@ class Keyframe:
     angle: float
     ease: str = "Linear"
     elastic_params: ElasticParams = field(default_factory=ElasticParams)
+    back_params: BackParams = field(default_factory=BackParams)
+    bounce_params: BounceParams = field(default_factory=BounceParams)
 
 
 class CameraTrack:
@@ -79,6 +88,20 @@ class CameraTrack:
                 # apply easing
                 if b.ease == "Elastic":
                     alpha = elastic(alpha, b.elastic_params)
+                elif "Back" in b.ease:
+                    if b.ease == "EaseInBack":
+                        alpha = ease_in_back(alpha, b.back_params)
+                    elif b.ease == "EaseOutBack":
+                        alpha = ease_out_back(alpha, b.back_params)
+                    else:
+                        alpha = ease_in_out_back(alpha, b.back_params)
+                elif "Bounce" in b.ease:
+                    if b.ease == "EaseInBounce":
+                        alpha = ease_in_bounce(alpha, b.bounce_params)
+                    elif b.ease == "EaseOutBounce":
+                        alpha = ease_out_bounce(alpha, b.bounce_params)
+                    else:
+                        alpha = ease_in_out_bounce(alpha, b.bounce_params)
                 else:
                     func = EASING_FUNCTIONS.get(b.ease, linear)
                     alpha = func(alpha)
@@ -98,6 +121,11 @@ class CameraTrack:
                 self.selected_index = i
                 return
         self.selected_index = None
+
+    def current(self) -> Keyframe | None:
+        if self.selected_index is None:
+            return None
+        return self.keyframes[self.selected_index]
 
     def move_selected(self, dx: float, dy: float) -> None:
         if self.selected_index is None:
@@ -127,6 +155,8 @@ class CameraTrack:
             src.angle,
             src.ease,
             ElasticParams(src.elastic_params.oscillations, src.elastic_params.decay),
+            BackParams(src.back_params.overshoot),
+            BounceParams(src.bounce_params.n1, src.bounce_params.d1),
         )
         self.keyframes.append(dup)
         self.keyframes.sort(key=lambda k: k.time)
@@ -165,6 +195,118 @@ class CameraTrack:
 # ---------------------------------------------------------------------------
 
 
+class ParamSlider:
+    def __init__(self, label: str, min_val: float, max_val: float,
+                 getter, setter) -> None:
+        self.label = label
+        self.min = min_val
+        self.max = max_val
+        self.getter = getter
+        self.setter = setter
+        self.rect = pygame.Rect(0, 0, 0, 0)
+        self.dragging = False
+
+    def handle_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                self.dragging = True
+                self._update(event.pos[0])
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self.dragging = False
+        elif event.type == pygame.MOUSEMOTION and self.dragging:
+            self._update(event.pos[0])
+
+    def _update(self, mx: int) -> None:
+        pos = (mx - self.rect.x) / self.rect.width
+        pos = max(0.0, min(1.0, pos))
+        val = self.min + pos * (self.max - self.min)
+        self.setter(val)
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font,
+             x: int, y: int) -> None:
+        value = self.getter()
+        label = f"{self.label}: {value:.2f}" if isinstance(value, float) else f"{self.label}: {value}"
+        txt = font.render(label, True, (230, 230, 230))
+        surface.blit(txt, (x, y))
+        y += 18
+        width = 160
+        self.rect = pygame.Rect(x, y, width, 8)
+        pygame.draw.rect(surface, (80, 80, 80), self.rect)
+        pos = (value - self.min) / (self.max - self.min)
+        knob_x = self.rect.x + pos * self.rect.width
+        pygame.draw.rect(surface, (200, 200, 0), pygame.Rect(knob_x - 4, y - 4, 8, 16))
+
+
+class ParamPanel:
+    BG = (45, 45, 45)
+
+    def __init__(self) -> None:
+        self.kf: Keyframe | None = None
+        self.sliders: list[ParamSlider] = []
+
+    def set_keyframe(self, kf: Keyframe | None) -> None:
+        if self.kf is kf and (kf is None or self.kf.ease == kf.ease):
+            return
+        self.kf = kf
+        self.sliders.clear()
+        if kf is None:
+            return
+        if kf.ease == "Elastic":
+            self.sliders.append(
+                ParamSlider(
+                    "Oscillations", 1, 10,
+                    lambda: kf.elastic_params.oscillations,
+                    lambda v: setattr(kf.elastic_params, "oscillations", int(v)),
+                )
+            )
+            self.sliders.append(
+                ParamSlider(
+                    "Decay", 0.1, 10.0,
+                    lambda: kf.elastic_params.decay,
+                    lambda v: setattr(kf.elastic_params, "decay", v),
+                )
+            )
+        elif "Back" in kf.ease:
+            self.sliders.append(
+                ParamSlider(
+                    "Overshoot", 0.0, 5.0,
+                    lambda: kf.back_params.overshoot,
+                    lambda v: setattr(kf.back_params, "overshoot", v),
+                )
+            )
+        elif "Bounce" in kf.ease:
+            self.sliders.append(
+                ParamSlider(
+                    "n1", 5.0, 10.0,
+                    lambda: kf.bounce_params.n1,
+                    lambda v: setattr(kf.bounce_params, "n1", v),
+                )
+            )
+            self.sliders.append(
+                ParamSlider(
+                    "d1", 2.0, 4.0,
+                    lambda: kf.bounce_params.d1,
+                    lambda v: setattr(kf.bounce_params, "d1", v),
+                )
+            )
+
+    def handle_event(self, event: pygame.event.Event) -> None:
+        for s in self.sliders:
+            s.handle_event(event)
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        if self.kf is None:
+            return
+        width = 220
+        rect = pygame.Rect(surface.get_width() - width, 0, width, surface.get_height())
+        pygame.draw.rect(surface, self.BG, rect)
+        y = 20
+        txt = font.render(f"Ease: {self.kf.ease}", True, (255, 255, 255))
+        surface.blit(txt, (rect.x + 10, y))
+        y += 40
+        for s in self.sliders:
+            s.draw(surface, font, rect.x + 10, y)
+            y += 40
 class Editor:
     TILE_COLOUR = (200, 200, 200)
     KEYFRAME_COLOUR = (255, 0, 0)
@@ -188,6 +330,8 @@ class Editor:
         # state
         self.playing = False
         self.current_ms = 0
+        self.font = pygame.font.SysFont("arial", 16)
+        self.param_panel = ParamPanel()
 
     # ------------------------------------------------------------------
     # Level parsing
@@ -227,6 +371,15 @@ class Editor:
                 angle = act.get("angleOffset", 0)
                 ease = act.get("ease", "Linear")
                 kf = Keyframe(t, pos[0], pos[1], zoom, angle, ease)
+                if ease == "Elastic" and "elasticParams" in act:
+                    ep = act["elasticParams"]
+                    kf.elastic_params = ElasticParams(ep.get("oscillations", 3), ep.get("decay", 3.0))
+                if "Back" in ease and "backParams" in act:
+                    bp = act["backParams"]
+                    kf.back_params = BackParams(bp.get("overshoot", 1.70158))
+                if "Bounce" in ease and "bounceParams" in act:
+                    bp2 = act["bounceParams"]
+                    kf.bounce_params = BounceParams(bp2.get("n1", 7.5625), bp2.get("d1", 2.75))
                 self.track.keyframes.append(kf)
         self.track.keyframes.sort(key=lambda k: k.time)
 
@@ -246,6 +399,7 @@ class Editor:
     # ------------------------------------------------------------------
     def _handle_events(self) -> None:
         for event in pygame.event.get():
+            self.param_panel.handle_event(event)
             if event.type == pygame.QUIT:
                 pygame.quit()
                 raise SystemExit
@@ -278,7 +432,9 @@ class Editor:
                     self.track.move_selected(0, 1)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
-                self.track.select_by_pos((mx, my))
+                if mx < self.screen.get_width() - 220:
+                    self.track.select_by_pos((mx, my))
+        self.param_panel.set_keyframe(self.track.current())
 
     def _toggle_play(self) -> None:
         if self.playing:
@@ -299,8 +455,8 @@ class Editor:
         if self.tile_pos:
             pygame.draw.lines(self.screen, self.TILE_COLOUR, False, self.tile_pos, 2)
         # Draw keyframes
-        for kf in self.track.keyframes:
-            colour = self.KEYFRAME_COLOUR
+        for i, kf in enumerate(self.track.keyframes):
+            colour = (255, 255, 0) if i == self.track.selected_index else self.KEYFRAME_COLOUR
             pygame.draw.circle(self.screen, colour, (int(kf.x), int(kf.y)), 5)
         # Draw camera position
         cam_x, cam_y, _z, _a = self.track.get_state_at(self.current_ms)
@@ -308,14 +464,15 @@ class Editor:
 
         # Simple timeline at bottom
         tl_height = 40
+        panel_w = 220
         pygame.draw.rect(
             self.screen,
             (80, 80, 80),
             pygame.Rect(0, self.screen.get_height() - tl_height,
-                        self.screen.get_width(), tl_height),
+                        self.screen.get_width() - panel_w, tl_height),
         )
         total = self.tile_time[-1] if self.tile_time else 1
-        x = int(self.current_ms / total * self.screen.get_width())
+        x = int(self.current_ms / total * (self.screen.get_width() - panel_w))
         pygame.draw.rect(
             self.screen,
             (200, 200, 0),
@@ -324,6 +481,8 @@ class Editor:
 
         # Easing preview for selected pair
         self._draw_easing_preview()
+        # Parameter panel
+        self.param_panel.draw(self.screen, self.font)
         pygame.display.flip()
 
     def _draw_easing_preview(self) -> None:
@@ -339,6 +498,20 @@ class Editor:
             t = i / 99
             if b.ease == "Elastic":
                 y = elastic(t, b.elastic_params)
+            elif "Back" in b.ease:
+                if b.ease == "EaseInBack":
+                    y = ease_in_back(t, b.back_params)
+                elif b.ease == "EaseOutBack":
+                    y = ease_out_back(t, b.back_params)
+                else:
+                    y = ease_in_out_back(t, b.back_params)
+            elif "Bounce" in b.ease:
+                if b.ease == "EaseInBounce":
+                    y = ease_in_bounce(t, b.bounce_params)
+                elif b.ease == "EaseOutBounce":
+                    y = ease_out_bounce(t, b.bounce_params)
+                else:
+                    y = ease_in_out_bounce(t, b.bounce_params)
             else:
                 func = EASING_FUNCTIONS.get(b.ease, linear)
                 y = func(t)
@@ -372,6 +545,15 @@ class Editor:
                 act["elasticParams"] = {
                     "oscillations": kf.elastic_params.oscillations,
                     "decay": kf.elastic_params.decay,
+                }
+            if "Back" in kf.ease:
+                act["backParams"] = {
+                    "overshoot": kf.back_params.overshoot,
+                }
+            if "Bounce" in kf.ease:
+                act["bounceParams"] = {
+                    "n1": kf.bounce_params.n1,
+                    "d1": kf.bounce_params.d1,
                 }
             actions.append(act)
         self.level.actions = actions
