@@ -9,6 +9,8 @@ This repository contains an experimental camera editor for [ADOFAI](https://stor
 * Add and move camera keyframes with a wide range of easing functions
   (Quad, Cubic, Quart, Quint, Sine, Expo, Circ, Back, Bounce, Elastic)
 * Elastic, Back and Bounce easing with adjustable parameters via a side panel
+* Buttons to load new `.adofai` and audio files and to save the edited map
+* Numeric value entry for position, zoom and angle with `Ctrl+X/Y/Z/A`
 * Real‑time preview of camera position and easing curve
 * Convenience shortcuts inspired by animation tools (add/delete/duplicate
   keyframes, cycle easing types, jump between keyframes)

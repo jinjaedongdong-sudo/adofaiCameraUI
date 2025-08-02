@@ -19,6 +19,7 @@ from typing import List, Tuple
 
 import pygame
 import adofaipy
+from tkinter import Tk, filedialog, simpledialog
 
 from easing import (
     EASING_FUNCTIONS,
@@ -237,6 +238,23 @@ class ParamSlider:
         pygame.draw.rect(surface, (200, 200, 0), pygame.Rect(knob_x - 4, y - 4, 8, 16))
 
 
+class Button:
+    def __init__(self, rect: pygame.Rect, text: str, callback) -> None:
+        self.rect = rect
+        self.text = text
+        self.callback = callback
+
+    def handle_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                self.callback()
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        pygame.draw.rect(surface, (70, 70, 70), self.rect)
+        txt = font.render(self.text, True, (255, 255, 255))
+        surface.blit(txt, txt.get_rect(center=self.rect.center))
+
+
 class ParamPanel:
     BG = (45, 45, 45)
 
@@ -332,6 +350,12 @@ class Editor:
         self.current_ms = 0
         self.font = pygame.font.SysFont("arial", 16)
         self.param_panel = ParamPanel()
+        # ui buttons
+        self.buttons: list[Button] = [
+            Button(pygame.Rect(10, 10, 100, 30), "Open Level", self._open_level),
+            Button(pygame.Rect(120, 10, 100, 30), "Open Audio", self._open_audio),
+            Button(pygame.Rect(230, 10, 100, 30), "Save", self._save_dialog),
+        ]
 
     # ------------------------------------------------------------------
     # Level parsing
@@ -400,6 +424,8 @@ class Editor:
     def _handle_events(self) -> None:
         for event in pygame.event.get():
             self.param_panel.handle_event(event)
+            for btn in self.buttons:
+                btn.handle_event(event)
             if event.type == pygame.QUIT:
                 pygame.quit()
                 raise SystemExit
@@ -430,6 +456,14 @@ class Editor:
                     self.track.move_selected(0, -1)
                 elif event.key == pygame.K_s:
                     self.track.move_selected(0, 1)
+                elif event.key == pygame.K_x and event.mod & pygame.KMOD_CTRL:
+                    self._prompt_selected("x")
+                elif event.key == pygame.K_y and event.mod & pygame.KMOD_CTRL:
+                    self._prompt_selected("y")
+                elif event.key == pygame.K_z and event.mod & pygame.KMOD_CTRL:
+                    self._prompt_selected("zoom")
+                elif event.key == pygame.K_a and event.mod & pygame.KMOD_CTRL:
+                    self._prompt_selected("angle")
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
                 if mx < self.screen.get_width() - 220:
@@ -483,6 +517,8 @@ class Editor:
         self._draw_easing_preview()
         # Parameter panel
         self.param_panel.draw(self.screen, self.font)
+        for btn in self.buttons:
+            btn.draw(self.screen, self.font)
         pygame.display.flip()
 
     def _draw_easing_preview(self) -> None:
@@ -566,6 +602,49 @@ class Editor:
                 return i + 1
         return len(self.tile_time)
 
+    # ------------------------------------------------------------------
+    # File operations and prompts
+    # ------------------------------------------------------------------
+
+    def _open_level(self) -> None:
+        root = Tk(); root.withdraw()
+        path = filedialog.askopenfilename(filetypes=[("ADOFAI", "*.adofai")])
+        root.destroy()
+        if not path:
+            return
+        self.level = adofaipy.load(path)
+        self.track = CameraTrack()
+        self.tile_pos, self.tile_time = self._parse_tiles()
+        self._init_keyframes_from_level()
+        self.current_ms = 0
+
+    def _open_audio(self) -> None:
+        root = Tk(); root.withdraw()
+        path = filedialog.askopenfilename(filetypes=[("Audio", "*.ogg *.mp3 *.wav")])
+        root.destroy()
+        if not path:
+            return
+        pygame.mixer.music.load(path)
+
+    def _save_dialog(self) -> None:
+        root = Tk(); root.withdraw()
+        path = filedialog.asksaveasfilename(defaultextension=".adofai", filetypes=[("ADOFAI", "*.adofai")])
+        root.destroy()
+        if not path:
+            return
+        self.save(Path(path))
+
+    def _prompt_selected(self, field: str) -> None:
+        kf = self.track.current()
+        if kf is None:
+            return
+        root = Tk(); root.withdraw()
+        current = getattr(kf, field)
+        val = simpledialog.askfloat("Set value", f"Enter {field}", initialvalue=current)
+        root.destroy()
+        if val is not None:
+            setattr(kf, field, val)
+
 
 # ---------------------------------------------------------------------------
 # Entrypoint
@@ -576,11 +655,21 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="ADOFAI camera editor")
-    parser.add_argument("adofai", type=Path, help="Path to .adofai file")
-    parser.add_argument("audio", type=Path, help="Path to audio file")
+    parser.add_argument("adofai", type=Path, nargs="?", help="Path to .adofai file")
+    parser.add_argument("audio", type=Path, nargs="?", help="Path to audio file")
     args = parser.parse_args()
 
-    editor = Editor(args.adofai, args.audio)
+    if args.adofai and args.audio:
+        editor = Editor(args.adofai, args.audio)
+    else:
+        root = Tk(); root.withdraw()
+        adofai_path = filedialog.askopenfilename(filetypes=[("ADOFAI", "*.adofai")])
+        audio_path = filedialog.askopenfilename(filetypes=[("Audio", "*.ogg *.mp3 *.wav")])
+        root.destroy()
+        if not adofai_path or not audio_path:
+            print("No files selected")
+            return
+        editor = Editor(Path(adofai_path), Path(audio_path))
     editor.run()
 
 
