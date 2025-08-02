@@ -217,6 +217,39 @@ def elastic(t: float, params: ElasticParams = ElasticParams()) -> float:
     decay_term = math.exp(-params.decay * t)
     return 1 - (sin_term * decay_term)
 
+
+def cubic_bezier(p1x: float, p1y: float, p2x: float, p2y: float) -> Callable[[float], float]:
+    """Return a cubic bezier easing function defined by control points."""
+
+    def func(t: float) -> float:
+        # Invert x(t) using Newton-Raphson iterations
+        u = t
+        for _ in range(5):
+            x = (
+                (1 - u) ** 3 * 0
+                + 3 * (1 - u) ** 2 * u * p1x
+                + 3 * (1 - u) * u ** 2 * p2x
+                + u ** 3
+            )
+            dx = (
+                3 * (1 - u) ** 2 * (p1x - 0)
+                + 6 * (1 - u) * u * (p2x - p1x)
+                + 3 * u ** 2 * (1 - p2x)
+            )
+            if dx == 0:
+                break
+            u -= (x - t) / dx
+            u = max(0.0, min(1.0, u))
+        y = (
+            (1 - u) ** 3 * 0
+            + 3 * (1 - u) ** 2 * u * p1y
+            + 3 * (1 - u) * u ** 2 * p2y
+            + u ** 3
+        )
+        return y
+
+    return func
+
 # Registry of easing functions for easy selection
 EASING_FUNCTIONS: dict[str, Callable[[float], float]] = {
     "Linear": linear,
