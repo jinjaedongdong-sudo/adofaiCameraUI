@@ -430,6 +430,7 @@ class Editor:
     TILE_COLOUR = (200, 200, 200)
     KEYFRAME_COLOUR = (255, 0, 0)
     CAM_COLOUR = (0, 0, 255)
+    RENDER_CAM_COLOUR = (255, 150, 0)
 
     def __init__(self, adofai_path: Path, audio_path: Path) -> None:
         pygame.init()
@@ -457,6 +458,10 @@ class Editor:
             Button(pygame.Rect(120, 10, 100, 30), "Open Audio", self._open_audio),
             Button(pygame.Rect(230, 10, 100, 30), "Save", self._save_dialog),
         ]
+        # timeline state
+        self.timeline_height = 120
+        self.timeline_rect = pygame.Rect(0, 0, 0, 0)
+        self.timeline_scrubbing = False
 
     # ------------------------------------------------------------------
     # Level parsing
@@ -576,8 +581,16 @@ class Editor:
                     self._prompt_selected("angle")
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
-                if mx < self.screen.get_width() - 220:
+                if self.timeline_rect.collidepoint(event.pos):
+                    self._set_time_from_timeline(mx)
+                    self.timeline_scrubbing = True
+                    self.playing = False
+                elif mx < self.screen.get_width() - 220:
                     self.track.select_by_pos((mx, my))
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self.timeline_scrubbing = False
+            elif event.type == pygame.MOUSEMOTION and self.timeline_scrubbing:
+                self._set_time_from_timeline(event.pos[0])
         self.param_panel.set_keyframe(self.track.current())
 
     def _toggle_play(self) -> None:
@@ -592,6 +605,12 @@ class Editor:
             return
         self.current_ms = self.track.keyframes[self.track.selected_index].time
 
+    def _set_time_from_timeline(self, mx: int) -> None:
+        panel_w = 220
+        width = self.screen.get_width() - panel_w
+        total = self.tile_time[-1] if self.tile_time else 1
+        self.current_ms = int(mx / max(1, width) * total)
+
     # ------------------------------------------------------------------
     def _draw(self) -> None:
         self.screen.fill((30, 30, 30))
@@ -604,24 +623,11 @@ class Editor:
             pygame.draw.circle(self.screen, colour, (int(kf.x), int(kf.y)), 5)
         # Draw camera position
         cam_x, cam_y, _z, _a = self.track.get_state_at(self.current_ms)
-        pygame.draw.circle(self.screen, self.CAM_COLOUR, (int(cam_x), int(cam_y)), 7)
+        cam_col = self.RENDER_CAM_COLOUR if self.playing else self.CAM_COLOUR
+        pygame.draw.circle(self.screen, cam_col, (int(cam_x), int(cam_y)), 7)
 
-        # Simple timeline at bottom
-        tl_height = 40
-        panel_w = 220
-        pygame.draw.rect(
-            self.screen,
-            (80, 80, 80),
-            pygame.Rect(0, self.screen.get_height() - tl_height,
-                        self.screen.get_width() - panel_w, tl_height),
-        )
-        total = self.tile_time[-1] if self.tile_time else 1
-        x = int(self.current_ms / total * (self.screen.get_width() - panel_w))
-        pygame.draw.rect(
-            self.screen,
-            (200, 200, 0),
-            pygame.Rect(x - 2, self.screen.get_height() - tl_height, 4, tl_height),
-        )
+        # Timeline at bottom
+        self._draw_timeline()
 
         # Easing preview for selected pair
         self._draw_easing_preview()
@@ -630,6 +636,59 @@ class Editor:
         for btn in self.buttons:
             btn.draw(self.screen, self.font)
         pygame.display.flip()
+
+    def _draw_timeline(self) -> None:
+        panel_w = 220
+        width = self.screen.get_width() - panel_w
+        y = self.screen.get_height() - self.timeline_height
+        self.timeline_rect = pygame.Rect(0, y, width, self.timeline_height)
+        pygame.draw.rect(self.screen, (60, 60, 60), self.timeline_rect)
+        total = self.tile_time[-1] if self.tile_time else 1
+        row_h = self.timeline_height // 4
+        params = [
+            ("x", (255, 80, 80)),
+            ("y", (80, 255, 80)),
+            ("zoom", (80, 80, 255)),
+            ("angle", (255, 255, 80)),
+        ]
+        for idx, (attr, colour) in enumerate(params):
+            row_top = y + idx * row_h
+            pygame.draw.line(
+                self.screen, (80, 80, 80), (0, row_top + row_h // 2), (width, row_top + row_h // 2)
+            )
+            vals = [getattr(kf, attr) for kf in self.track.keyframes]
+            if not vals:
+                continue
+            vmin, vmax = min(vals), max(vals)
+            if vmin == vmax:
+                vmin -= 1
+                vmax += 1
+            sample = 200
+            points: list[tuple[int, float]] = []
+            for i in range(sample):
+                t = i / (sample - 1) * total
+                x, y_val, z, a = self.track.get_state_at(int(t))
+                value = {"x": x, "y": y_val, "zoom": z, "angle": a}[attr]
+                px = int(i / (sample - 1) * width)
+                py = row_top + row_h - (value - vmin) / (vmax - vmin) * row_h
+                points.append((px, py))
+            if points:
+                pygame.draw.lines(self.screen, colour, False, points, 2)
+            for kf in self.track.keyframes:
+                px = int(kf.time / total * width)
+                val = getattr(kf, attr)
+                py = row_top + row_h - (val - vmin) / (vmax - vmin) * row_h
+                pygame.draw.circle(self.screen, colour, (px, int(py)), 3)
+            label = self.font.render(attr, True, colour)
+            self.screen.blit(label, (5, row_top + 2))
+        scrub_x = int(self.current_ms / total * width)
+        pygame.draw.line(
+            self.screen,
+            (230, 230, 230),
+            (scrub_x, y),
+            (scrub_x, y + self.timeline_height),
+            2,
+        )
 
     def _draw_easing_preview(self) -> None:
         idx = self.track.selected_index
