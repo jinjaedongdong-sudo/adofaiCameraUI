@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import List, Tuple
 
 import pygame
-import adofaipy
 from tkinter import Tk, filedialog, simpledialog
+
+from level import Level
 
 from easing import (
     EASING_FUNCTIONS,
@@ -52,6 +53,7 @@ class Keyframe:
     elastic_params: ElasticParams = field(default_factory=ElasticParams)
     back_params: BackParams = field(default_factory=BackParams)
     bounce_params: BounceParams = field(default_factory=BounceParams)
+    custom_ease: List[float] | None = None
 
 
 class CameraTrack:
@@ -87,25 +89,29 @@ class CameraTrack:
             if a.time <= time_ms <= b.time:
                 alpha = (time_ms - a.time) / (b.time - a.time)
                 # apply easing
-                if b.ease == "Elastic":
-                    alpha = elastic(alpha, b.elastic_params)
-                elif "Back" in b.ease:
-                    if b.ease == "EaseInBack":
-                        alpha = ease_in_back(alpha, b.back_params)
-                    elif b.ease == "EaseOutBack":
-                        alpha = ease_out_back(alpha, b.back_params)
-                    else:
-                        alpha = ease_in_out_back(alpha, b.back_params)
-                elif "Bounce" in b.ease:
-                    if b.ease == "EaseInBounce":
-                        alpha = ease_in_bounce(alpha, b.bounce_params)
-                    elif b.ease == "EaseOutBounce":
-                        alpha = ease_out_bounce(alpha, b.bounce_params)
-                    else:
-                        alpha = ease_in_out_bounce(alpha, b.bounce_params)
+                if b.custom_ease:
+                    idx = min(int(alpha * (len(b.custom_ease) - 1)), len(b.custom_ease) - 1)
+                    alpha = b.custom_ease[idx]
                 else:
-                    func = EASING_FUNCTIONS.get(b.ease, linear)
-                    alpha = func(alpha)
+                    if b.ease == "Elastic":
+                        alpha = elastic(alpha, b.elastic_params)
+                    elif "Back" in b.ease:
+                        if b.ease == "EaseInBack":
+                            alpha = ease_in_back(alpha, b.back_params)
+                        elif b.ease == "EaseOutBack":
+                            alpha = ease_out_back(alpha, b.back_params)
+                        else:
+                            alpha = ease_in_out_back(alpha, b.back_params)
+                    elif "Bounce" in b.ease:
+                        if b.ease == "EaseInBounce":
+                            alpha = ease_in_bounce(alpha, b.bounce_params)
+                        elif b.ease == "EaseOutBounce":
+                            alpha = ease_out_bounce(alpha, b.bounce_params)
+                        else:
+                            alpha = ease_in_out_bounce(alpha, b.bounce_params)
+                    else:
+                        func = EASING_FUNCTIONS.get(b.ease, linear)
+                        alpha = func(alpha)
                 x = a.x * (1 - alpha) + b.x * alpha
                 y = a.y * (1 - alpha) + b.y * alpha
                 z = a.zoom * (1 - alpha) + b.zoom * alpha
@@ -338,7 +344,7 @@ class Editor:
         self.clock = pygame.time.Clock()
 
         # Load level and audio
-        self.level = adofaipy.load(str(adofai_path))
+        self.level = Level.load(adofai_path)
         self.audio_path = audio_path
         pygame.mixer.music.load(str(audio_path))
         self.track = CameraTrack()
@@ -395,6 +401,10 @@ class Editor:
                 angle = act.get("angleOffset", 0)
                 ease = act.get("ease", "Linear")
                 kf = Keyframe(t, pos[0], pos[1], zoom, angle, ease)
+                if "customEase" in act:
+                    kf.custom_ease = act["customEase"]
+                else:
+                    kf.custom_ease = self._render_custom_ease(kf)
                 if ease == "Elastic" and "elasticParams" in act:
                     ep = act["elasticParams"]
                     kf.elastic_params = ElasticParams(ep.get("oscillations", 3), ep.get("decay", 3.0))
@@ -567,6 +577,8 @@ class Editor:
                    if a.get("eventType") != "MoveCamera"]
         for kf in self.track.keyframes:
             floor = self._floor_for_time(kf.time)
+            curve = self._render_custom_ease(kf)
+            kf.custom_ease = curve
             act = {
                 "floor": floor,
                 "eventType": "MoveCamera",
@@ -576,6 +588,7 @@ class Editor:
                 "zoom": kf.zoom,
                 "angleOffset": kf.angle,
                 "ease": kf.ease,
+                "customEase": curve,
             }
             if kf.ease == "Elastic":
                 act["elasticParams"] = {
@@ -602,6 +615,29 @@ class Editor:
                 return i + 1
         return len(self.tile_time)
 
+    def _render_custom_ease(self, kf: Keyframe, samples: int = 60) -> List[float]:
+        """Render the easing curve for ``kf`` using only built-in functions."""
+        t_values = [i / (samples - 1) for i in range(samples)]
+        if kf.ease == "Elastic":
+            func = lambda t: elastic(t, kf.elastic_params)
+        elif "Back" in kf.ease:
+            if kf.ease == "EaseInBack":
+                func = lambda t: ease_in_back(t, kf.back_params)
+            elif kf.ease == "EaseOutBack":
+                func = lambda t: ease_out_back(t, kf.back_params)
+            else:
+                func = lambda t: ease_in_out_back(t, kf.back_params)
+        elif "Bounce" in kf.ease:
+            if kf.ease == "EaseInBounce":
+                func = lambda t: ease_in_bounce(t, kf.bounce_params)
+            elif kf.ease == "EaseOutBounce":
+                func = lambda t: ease_out_bounce(t, kf.bounce_params)
+            else:
+                func = lambda t: ease_in_out_bounce(t, kf.bounce_params)
+        else:
+            func = EASING_FUNCTIONS.get(kf.ease, linear)
+        return [func(t) for t in t_values]
+
     # ------------------------------------------------------------------
     # File operations and prompts
     # ------------------------------------------------------------------
@@ -612,7 +648,7 @@ class Editor:
         root.destroy()
         if not path:
             return
-        self.level = adofaipy.load(path)
+        self.level = Level.load(path)
         self.track = CameraTrack()
         self.tile_pos, self.tile_time = self._parse_tiles()
         self._init_keyframes_from_level()
