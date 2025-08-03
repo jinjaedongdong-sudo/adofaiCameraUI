@@ -197,6 +197,10 @@ def ease_in_out_bounce(t: float, params: BounceParams = BounceParams()) -> float
 class ElasticParams:
     oscillations: int = 3
     decay: float = 3.0
+    # Additional phase shift parameter allowing the curve to start at a
+    # different point of the oscillation cycle.  This gives creators more
+    # freedom to fine tune the feel of the easing.
+    phase: float = 0.0
 
 
 def elastic(t: float, params: ElasticParams = ElasticParams()) -> float:
@@ -213,7 +217,7 @@ def elastic(t: float, params: ElasticParams = ElasticParams()) -> float:
     if t == 0 or t == 1:
         return t
     # Exponential decay multiplied by an oscillating sine component
-    sin_term = math.sin(params.oscillations * 2 * math.pi * t)
+    sin_term = math.sin(params.oscillations * 2 * math.pi * t + params.phase)
     decay_term = math.exp(-params.decay * t)
     return 1 - (sin_term * decay_term)
 
