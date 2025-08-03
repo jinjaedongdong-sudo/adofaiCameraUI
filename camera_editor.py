@@ -11,7 +11,6 @@ as more editing tools or better timeline management can be added easily.
 """
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +57,16 @@ class Keyframe:
     bezier_p1: Tuple[float, float] = (0.25, 0.25)
     bezier_p2: Tuple[float, float] = (0.75, 0.75)
     custom_ease: List[float] | None = None
+    # Allow stacking of additional offsets which will be summed during
+    # interpolation.  This makes it possible to layer multiple offset sources
+    # such as screen shake or scripted camera movements.
+    offsets: List[Tuple[float, float]] = field(default_factory=list)
+
+    def total_offset(self) -> Tuple[float, float]:
+        """Return the cumulative offset from all layers."""
+        ox = sum(o[0] for o in self.offsets)
+        oy = sum(o[1] for o in self.offsets)
+        return ox, oy
 
 
 class CameraTrack:
@@ -116,8 +125,10 @@ class CameraTrack:
                     else:
                         func = EASING_FUNCTIONS.get(b.ease, linear)
                         alpha = func(alpha)
-                x = a.x * (1 - alpha) + b.x * alpha
-                y = a.y * (1 - alpha) + b.y * alpha
+                ax_off, ay_off = a.total_offset()
+                bx_off, by_off = b.total_offset()
+                x = (a.x + ax_off) * (1 - alpha) + (b.x + bx_off) * alpha
+                y = (a.y + ay_off) * (1 - alpha) + (b.y + by_off) * alpha
                 z = a.zoom * (1 - alpha) + b.zoom * alpha
                 ang = a.angle * (1 - alpha) + b.angle * alpha
                 return x, y, z, ang
@@ -165,12 +176,17 @@ class CameraTrack:
             src.zoom,
             src.angle,
             src.ease,
-            ElasticParams(src.elastic_params.oscillations, src.elastic_params.decay),
+            ElasticParams(
+                src.elastic_params.oscillations,
+                src.elastic_params.decay,
+                src.elastic_params.phase,
+            ),
             BackParams(src.back_params.overshoot),
             BounceParams(src.bounce_params.n1, src.bounce_params.d1),
             src.bezier_p1,
             src.bezier_p2,
             src.custom_ease[:] if src.custom_ease else None,
+            src.offsets[:],
         )
         self.keyframes.append(dup)
         self.keyframes.sort(key=lambda k: k.time)
@@ -378,6 +394,13 @@ class ParamPanel:
                     lambda v: setattr(kf.elastic_params, "decay", v),
                 )
             )
+            self.sliders.append(
+                ParamSlider(
+                    "Phase", -math.pi, math.pi,
+                    lambda: kf.elastic_params.phase,
+                    lambda v: setattr(kf.elastic_params, "phase", v),
+                )
+            )
         elif "Back" in kf.ease:
             self.sliders.append(
                 ParamSlider(
@@ -512,7 +535,11 @@ class Editor:
                     kf.custom_ease = self._render_custom_ease(kf)
                 if ease == "Elastic" and "elasticParams" in act:
                     ep = act["elasticParams"]
-                    kf.elastic_params = ElasticParams(ep.get("oscillations", 3), ep.get("decay", 3.0))
+                    kf.elastic_params = ElasticParams(
+                        ep.get("oscillations", 3),
+                        ep.get("decay", 3.0),
+                        ep.get("phase", 0.0),
+                    )
                 if "Back" in ease and "backParams" in act:
                     bp = act["backParams"]
                     kf.back_params = BackParams(bp.get("overshoot", 1.70158))
@@ -721,12 +748,13 @@ class Editor:
             curve = self._render_custom_ease(kf)
             kf.custom_ease = curve
             ease_val = kf.ease if kf.ease != "Bezier" else "Linear"
+            ox, oy = kf.total_offset()
             act = {
                 "floor": floor,
                 "eventType": "MoveCamera",
                 "duration": 0,
                 "relativeTo": "World",
-                "position": [kf.x, kf.y],
+                "position": [kf.x + ox, kf.y + oy],
                 "zoom": kf.zoom,
                 "angleOffset": kf.angle,
                 "ease": ease_val,
@@ -743,6 +771,7 @@ class Editor:
                 act["elasticParams"] = {
                     "oscillations": kf.elastic_params.oscillations,
                     "decay": kf.elastic_params.decay,
+                    "phase": kf.elastic_params.phase,
                 }
             if "Back" in kf.ease:
                 act["backParams"] = {
@@ -755,8 +784,7 @@ class Editor:
                 }
             actions.append(act)
         self.level.actions = actions
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(self.level.dict(), f, ensure_ascii=False, indent=2)
+        self.level.write(out_path)
 
     def _floor_for_time(self, t: int) -> int:
         for i, tm in enumerate(self.tile_time):
