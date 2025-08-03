@@ -11,8 +11,8 @@ as more editing tools or better timeline management can be added easily.
 """
 from __future__ import annotations
 
-import json
 import math
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
@@ -58,6 +58,16 @@ class Keyframe:
     bezier_p1: Tuple[float, float] = (0.25, 0.25)
     bezier_p2: Tuple[float, float] = (0.75, 0.75)
     custom_ease: List[float] | None = None
+    # Allow stacking of additional offsets which will be summed during
+    # interpolation.  This makes it possible to layer multiple offset sources
+    # such as screen shake or scripted camera movements.
+    offsets: List[Tuple[float, float]] = field(default_factory=list)
+
+    def total_offset(self) -> Tuple[float, float]:
+        """Return the cumulative offset from all layers."""
+        ox = sum(o[0] for o in self.offsets)
+        oy = sum(o[1] for o in self.offsets)
+        return ox, oy
 
 
 class CameraTrack:
@@ -116,8 +126,10 @@ class CameraTrack:
                     else:
                         func = EASING_FUNCTIONS.get(b.ease, linear)
                         alpha = func(alpha)
-                x = a.x * (1 - alpha) + b.x * alpha
-                y = a.y * (1 - alpha) + b.y * alpha
+                ax_off, ay_off = a.total_offset()
+                bx_off, by_off = b.total_offset()
+                x = (a.x + ax_off) * (1 - alpha) + (b.x + bx_off) * alpha
+                y = (a.y + ay_off) * (1 - alpha) + (b.y + by_off) * alpha
                 z = a.zoom * (1 - alpha) + b.zoom * alpha
                 ang = a.angle * (1 - alpha) + b.angle * alpha
                 return x, y, z, ang
@@ -165,12 +177,17 @@ class CameraTrack:
             src.zoom,
             src.angle,
             src.ease,
-            ElasticParams(src.elastic_params.oscillations, src.elastic_params.decay),
+            ElasticParams(
+                src.elastic_params.oscillations,
+                src.elastic_params.decay,
+                src.elastic_params.phase,
+            ),
             BackParams(src.back_params.overshoot),
             BounceParams(src.bounce_params.n1, src.bounce_params.d1),
             src.bezier_p1,
             src.bezier_p2,
             src.custom_ease[:] if src.custom_ease else None,
+            src.offsets[:],
         )
         self.keyframes.append(dup)
         self.keyframes.sort(key=lambda k: k.time)
@@ -378,6 +395,13 @@ class ParamPanel:
                     lambda v: setattr(kf.elastic_params, "decay", v),
                 )
             )
+            self.sliders.append(
+                ParamSlider(
+                    "Phase", -math.pi, math.pi,
+                    lambda: kf.elastic_params.phase,
+                    lambda v: setattr(kf.elastic_params, "phase", v),
+                )
+            )
         elif "Back" in kf.ease:
             self.sliders.append(
                 ParamSlider(
@@ -445,6 +469,15 @@ class Editor:
         pygame.mixer.music.load(str(audio_path))
         self.track = CameraTrack()
         self.tile_pos, self.tile_time = self._parse_tiles()
+        # Determine centre of the tile layout so we can render it in the middle
+        # of the screen rather than in the top left corner.
+        if self.tile_pos:
+            xs = [p[0] for p in self.tile_pos]
+            ys = [p[1] for p in self.tile_pos]
+            self.path_center = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+        else:
+            self.path_center = (0.0, 0.0)
+        self.render_offset = (0.0, 0.0)
         self._init_keyframes_from_level()
 
         # state
@@ -462,6 +495,8 @@ class Editor:
         self.timeline_height = 120
         self.timeline_rect = pygame.Rect(0, 0, 0, 0)
         self.timeline_scrubbing = False
+        self.timeline_offset = 0  # left edge in milliseconds
+        self.timeline_ms_per_px = 20  # default scale: 20ms per pixel
 
     # ------------------------------------------------------------------
     # Level parsing
@@ -492,6 +527,15 @@ class Editor:
         return tile_pos, tile_time
 
     def _init_keyframes_from_level(self) -> None:
+        """Populate :class:`CameraTrack` from level actions and settings."""
+        self.track.keyframes.clear()
+        # Base keyframe from level settings so the editor always starts with a
+        # sensible camera position even if the level has no MoveCamera events.
+        settings = self.level.settings
+        pos = settings.get("position", [0, 0])
+        zoom = settings.get("zoom", 100)
+        angle = settings.get("angleOffset", 0)
+        self.track.keyframes.append(Keyframe(0, pos[0], pos[1], zoom, angle))
         for act in self.level.actions:
             if act.get("eventType") == "MoveCamera":
                 floor = act.get("floor", 1)
@@ -512,7 +556,11 @@ class Editor:
                     kf.custom_ease = self._render_custom_ease(kf)
                 if ease == "Elastic" and "elasticParams" in act:
                     ep = act["elasticParams"]
-                    kf.elastic_params = ElasticParams(ep.get("oscillations", 3), ep.get("decay", 3.0))
+                    kf.elastic_params = ElasticParams(
+                        ep.get("oscillations", 3),
+                        ep.get("decay", 3.0),
+                        ep.get("phase", 0.0),
+                    )
                 if "Back" in ease and "backParams" in act:
                     bp = act["backParams"]
                     kf.back_params = BackParams(bp.get("overshoot", 1.70158))
@@ -533,6 +581,7 @@ class Editor:
                 self.current_ms += dt
                 if self.current_ms >= self.tile_time[-1]:
                     self.playing = False
+                self._ensure_current_visible()
             self._draw()
 
     # ------------------------------------------------------------------
@@ -586,11 +635,17 @@ class Editor:
                     self.timeline_scrubbing = True
                     self.playing = False
                 elif mx < self.screen.get_width() - 220:
-                    self.track.select_by_pos((mx, my))
+                    wx, wy = self._screen_to_world(mx, my)
+                    self.track.select_by_pos((wx, wy))
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self.timeline_scrubbing = False
             elif event.type == pygame.MOUSEMOTION and self.timeline_scrubbing:
                 self._set_time_from_timeline(event.pos[0])
+            elif event.type == pygame.MOUSEWHEEL:
+                if self.timeline_rect.collidepoint(pygame.mouse.get_pos()):
+                    max_off = max(0, self.tile_time[-1] - self._timeline_visible_ms())
+                    self.timeline_offset -= event.y * 200  # scroll ~0.2s per notch
+                    self.timeline_offset = max(0, min(self.timeline_offset, max_off))
         self.param_panel.set_keyframe(self.track.current())
 
     def _toggle_play(self) -> None:
@@ -604,27 +659,71 @@ class Editor:
         if self.track.selected_index is None:
             return
         self.current_ms = self.track.keyframes[self.track.selected_index].time
+        self._ensure_current_visible()
 
     def _set_time_from_timeline(self, mx: int) -> None:
         panel_w = 220
         width = self.screen.get_width() - panel_w
-        total = self.tile_time[-1] if self.tile_time else 1
-        self.current_ms = int(mx / max(1, width) * total)
+        self.current_ms = self.timeline_offset + int(mx * self.timeline_ms_per_px)
+        self.current_ms = max(0, min(self.current_ms, self.tile_time[-1]))
+        self._ensure_current_visible()
+
+    def _timeline_visible_ms(self) -> int:
+        panel_w = 220
+        width = self.screen.get_width() - panel_w
+        return int(width * self.timeline_ms_per_px)
+
+    def _ensure_current_visible(self) -> None:
+        vis = self._timeline_visible_ms()
+        if self.current_ms < self.timeline_offset:
+            self.timeline_offset = self.current_ms
+        elif self.current_ms > self.timeline_offset + vis:
+            self.timeline_offset = self.current_ms - vis
+        max_off = max(0, self.tile_time[-1] - vis)
+        self.timeline_offset = max(0, min(self.timeline_offset, max_off))
+
+    def _world_to_screen(self, x: float, y: float) -> Tuple[int, int]:
+        ox, oy = self.render_offset
+        return int(x + ox), int(y + oy)
+
+    def _screen_to_world(self, x: float, y: float) -> Tuple[float, float]:
+        ox, oy = self.render_offset
+        return x - ox, y - oy
 
     # ------------------------------------------------------------------
     def _draw(self) -> None:
         self.screen.fill((30, 30, 30))
-        # Draw tiles
+        # compute offset so tiles are centered in remaining screen area
+        panel_w = 220
+        canvas_w = self.screen.get_width() - panel_w
+        canvas_h = self.screen.get_height() - self.timeline_height
+        off_x = canvas_w // 2 - self.path_center[0]
+        off_y = canvas_h // 2 - self.path_center[1]
+        self.render_offset = (off_x, off_y)
+
+        # Draw tiles and nicer tile nodes
         if self.tile_pos:
-            pygame.draw.lines(self.screen, self.TILE_COLOUR, False, self.tile_pos, 2)
+            pts = [self._world_to_screen(x, y) for x, y in self.tile_pos]
+            pygame.draw.lines(self.screen, self.TILE_COLOUR, False, pts, 2)
+            for px, py in pts:
+                pygame.draw.circle(self.screen, (100, 100, 100), (int(px), int(py)), 6)
+                pygame.draw.circle(self.screen, (230, 230, 230), (int(px), int(py)), 4)
+        # Draw player position
+        if self.tile_time:
+            idx = max(0, bisect_right(self.tile_time, self.current_ms) - 1)
+            px, py = self._world_to_screen(*self.tile_pos[idx])
+            pygame.draw.circle(self.screen, (0, 200, 255), (int(px), int(py)), 8)
+            pygame.draw.circle(self.screen, (255, 255, 255), (int(px), int(py)), 8, 2)
         # Draw keyframes
         for i, kf in enumerate(self.track.keyframes):
             colour = (255, 255, 0) if i == self.track.selected_index else self.KEYFRAME_COLOUR
-            pygame.draw.circle(self.screen, colour, (int(kf.x), int(kf.y)), 5)
+            sx, sy = self._world_to_screen(kf.x, kf.y)
+            pygame.draw.circle(self.screen, colour, (sx, sy), 5)
         # Draw camera position
         cam_x, cam_y, _z, _a = self.track.get_state_at(self.current_ms)
         cam_col = self.RENDER_CAM_COLOUR if self.playing else self.CAM_COLOUR
-        pygame.draw.circle(self.screen, cam_col, (int(cam_x), int(cam_y)), 7)
+        cx, cy = self._world_to_screen(cam_x, cam_y)
+        pygame.draw.circle(self.screen, cam_col, (cx, cy), 7)
 
         # Timeline at bottom
         self._draw_timeline()
@@ -643,6 +742,9 @@ class Editor:
         y = self.screen.get_height() - self.timeline_height
         self.timeline_rect = pygame.Rect(0, y, width, self.timeline_height)
         pygame.draw.rect(self.screen, (60, 60, 60), self.timeline_rect)
+        start = self.timeline_offset
+        visible = self._timeline_visible_ms()
+        end = start + visible
         total = self.tile_time[-1] if self.tile_time else 1
         row_h = self.timeline_height // 4
         params = [
@@ -666,7 +768,7 @@ class Editor:
             sample = 200
             points: list[tuple[int, float]] = []
             for i in range(sample):
-                t = i / (sample - 1) * total
+                t = start + i / (sample - 1) * visible
                 x, y_val, z, a = self.track.get_state_at(int(t))
                 value = {"x": x, "y": y_val, "zoom": z, "angle": a}[attr]
                 px = int(i / (sample - 1) * width)
@@ -675,13 +777,14 @@ class Editor:
             if points:
                 pygame.draw.lines(self.screen, colour, False, points, 2)
             for kf in self.track.keyframes:
-                px = int(kf.time / total * width)
-                val = getattr(kf, attr)
-                py = row_top + row_h - (val - vmin) / (vmax - vmin) * row_h
-                pygame.draw.circle(self.screen, colour, (px, int(py)), 3)
+                if start <= kf.time <= end:
+                    px = int((kf.time - start) / visible * width)
+                    val = getattr(kf, attr)
+                    py = row_top + row_h - (val - vmin) / (vmax - vmin) * row_h
+                    pygame.draw.circle(self.screen, colour, (px, int(py)), 3)
             label = self.font.render(attr, True, colour)
             self.screen.blit(label, (5, row_top + 2))
-        scrub_x = int(self.current_ms / total * width)
+        scrub_x = int((self.current_ms - start) / visible * width)
         pygame.draw.line(
             self.screen,
             (230, 230, 230),
@@ -721,12 +824,13 @@ class Editor:
             curve = self._render_custom_ease(kf)
             kf.custom_ease = curve
             ease_val = kf.ease if kf.ease != "Bezier" else "Linear"
+            ox, oy = kf.total_offset()
             act = {
                 "floor": floor,
                 "eventType": "MoveCamera",
                 "duration": 0,
                 "relativeTo": "World",
-                "position": [kf.x, kf.y],
+                "position": [kf.x + ox, kf.y + oy],
                 "zoom": kf.zoom,
                 "angleOffset": kf.angle,
                 "ease": ease_val,
@@ -743,6 +847,7 @@ class Editor:
                 act["elasticParams"] = {
                     "oscillations": kf.elastic_params.oscillations,
                     "decay": kf.elastic_params.decay,
+                    "phase": kf.elastic_params.phase,
                 }
             if "Back" in kf.ease:
                 act["backParams"] = {
@@ -755,8 +860,7 @@ class Editor:
                 }
             actions.append(act)
         self.level.actions = actions
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(self.level.dict(), f, ensure_ascii=False, indent=2)
+        self.level.write(out_path)
 
     def _floor_for_time(self, t: int) -> int:
         for i, tm in enumerate(self.tile_time):
@@ -807,8 +911,16 @@ class Editor:
         self.level = Level.load(path)
         self.track = CameraTrack()
         self.tile_pos, self.tile_time = self._parse_tiles()
+        if self.tile_pos:
+            xs = [p[0] for p in self.tile_pos]
+            ys = [p[1] for p in self.tile_pos]
+            self.path_center = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+        else:
+            self.path_center = (0.0, 0.0)
+        self.render_offset = (0.0, 0.0)
         self._init_keyframes_from_level()
         self.current_ms = 0
+        self.timeline_offset = 0
 
     def _open_audio(self) -> None:
         root = Tk(); root.withdraw()
